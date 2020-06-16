@@ -3,7 +3,9 @@
 import numpy as np
 import os
 
-from scipy.special import logsumexp
+from collections import Counter
+from scipy.special import factorial
+from scipy.stats.mstats import gmean
 
 
 def get_rank_cdf(ranks, n=None, default_weight=1.0):
@@ -73,37 +75,42 @@ def fisher_p_value(inputs, weights):
         a numpy array of shape (k,) giving the negative log of the combined
         p-values for each of k null hypotheses"""
 
-    unique_weights = np.unique(weights).tolist()
-    wt = np.copy(weights)
     nlogps = -np.log(inputs)
+    counts = Counter(weights)
 
-    # Combine p-values with identical weights iteratively
-    # until all effective weights are distinct
+    if len(mapper) == 1:
+        f = 1
+        v = nlogps.sum(0)
+        for i in range(nlogps.shape[0] - 1, 0, -1):
+            f = f * v / i + 1
+        return (v - np.log(f)).squeeze()
 
-    while len(unique_weights) != wt.shape[0]:
-        new_logps = []
-        new_wts = []
-        for w in unique_weights:
-            s = nlogps[wt == w]
-            v = s.sum(0)
-            f = 1
-            for i in range(s.shape[0] - 1, 0, -1):
-                f = f * v / i + 1
-            new_logps.append(v - np.log(f))
-            new_wts.append(s.shape[0] * w)
-        nlogps = np.array(new_logps)
-        wt = np.array(new_wts)
-        unique_weights = np.unique(wt).tolist()
+    weights = weights/gmean(weights)
+    v = np.dot(weights, nlogps)
+    counts = [(0, 1)] + [(1/w, count) for w, count in counts.items()]
+    counts = sorted(counts, key=lambda x: -x[1])
+    a, n = map(np.array, zip(*mapper))
+    batch_sizes = enumerate(np.diff(np.flip(n-1), prepend=0))
+    batch_sizes = sum([[n.shape[0] - i] * c for i, c in batch_sizes], [])
 
-    if len(unique_weights) == 1:
-        return nlogps.squeeze()
+    adiff = a[:, None] - a[None, :]
+    np.fill_diagonal(adiff, 1)
+    adiff = 1 / adiff
+    c = [np.prod(np.power(adiff, -n), axis=1).flatten()]
+    np.fill_diagonal(adiff, 0)
 
-    # Combine p-values with distinct weights
+    factor = np.exp(-v[:, None] * a[None, :])
+    factor *= np.power(v[:, None], n[None, :]-1)
+    factor /= factorial(n-1)
+    lhpval = np.dot(factor, c[0])
+    for i, size in enumerate(batch_sizes):
+        factor *= n-i-1
+        factor /= v[:, None]
+        amats.append(adiff[:size] if len(amats) == 0
+                     else amats[-1][:size] * adiff[:size])
+        terms = [prevc[:size] * np.dot(amat[:size], n)
+                 for prevc, amat in zip(c, amats)]
+        c.insert(0, np.array(terms).mean(axis=0))
+        lhpval += np.dot(factor[:, :size], c[0])
 
-    stat = np.dot(wt, nlogps)
-    stat = (wt.shape[0] - 1) * np.log(wt) - stat[:, None] / wt[None, :]
-
-    wt = wt[:, None] - wt[None, :]
-    wt[wt == 0] = 1
-    wt = np.prod(wt, axis=1).flatten()
-    return -logsumexp(stat, axis=1, b=1 / wt)
+    return 1 - lhpval
