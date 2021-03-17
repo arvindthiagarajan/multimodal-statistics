@@ -66,18 +66,22 @@ def fisher_p_value(inputs, weights):
        variant of Fisher's method
 
     Args:
-        inputs: a numpy array of shape (n,k) such that inputs[:, i] corresponds
-                to the p-values for null hypothesis i from all n different
+        inputs: an array-like object that can be reshaped to a numpy array
+                of shape (n, k) such that inputs[:, i] corresponds to the
+                p-values for null hypothesis i from all n different
                 experiments
-        weights: a numpy array of shape (n,) such that weights[j] is the
-                 confidence weight assigned to experiment j
+        weights: an array-like object of shape (n,) such that weights[j]
+                 is the confidence weight assigned to experiment j
 
     Returns:
-        a numpy array of shape (k,) giving the combined p-values for each
-        of k null hypotheses"""
+        a numpy array of shape (k,) giving the combined p-values
+        for each of k null hypotheses"""
 
+    weights = np.array(weights).reshape(-1)
+    inputs = np.array(inputs).reshape(weights.shape[0], -1)
     mask = weights > 0
     inputs, weights = inputs[mask], weights[mask]
+    weights = weights / gmean(weights)
 
     nlogps = -np.log(inputs)
     counts = Counter(weights)
@@ -87,33 +91,33 @@ def fisher_p_value(inputs, weights):
         v = nlogps.sum(0)
         for i in range(nlogps.shape[0] - 1, 0, -1):
             f = f * v / i + 1
-        return (v - np.log(f)).squeeze()
+        return np.exp(np.log(f) - v).reshape(-1)
 
-    weights = weights / gmean(weights)
     v = np.dot(weights, nlogps)
     counts = [(0, 1)] + [(1 / w, count) for w, count in counts.items()]
     counts = sorted(counts, key=lambda x: -x[1])
     a, n = map(np.array, zip(*counts))
+    mask = a > 0
+    numerator = np.prod(np.power(a[mask], n[mask]))
     batch_sizes = enumerate(np.diff(np.flip(n - 1), prepend=0))
     batch_sizes = sum([[n.shape[0] - i] * c for i, c in batch_sizes], [])
 
     adiff = a[:, None] - a[None, :]
     np.fill_diagonal(adiff, 1)
     adiff = 1 / adiff
-    c = [np.prod(np.power(adiff, -n), axis=1).flatten()]
+    c = [numerator * np.prod(np.power(adiff.T, n), axis=1).flatten()]
     np.fill_diagonal(adiff, 0)
 
     amats = []
     factor = np.exp(-v[:, None] * a[None, :])
     factor *= np.power(v[:, None], n[None, :] - 1)
     factor /= factorial(n - 1)
+
     lhpval = np.dot(factor, c[0])
     for i, size in enumerate(batch_sizes):
         factor *= n - i - 1
         factor /= v[:, None]
-        amats.append(
-            adiff[:size] if len(amats) == 0 else amats[-1][:size] * adiff[:size]
-        )
+        amats.append((amats[-1][:size] if len(amats) > 0 else 1) * adiff[:size])
         terms = [prevc[:size] * np.dot(amat[:size], n) for prevc, amat in zip(c, amats)]
         c.insert(0, np.array(terms).mean(axis=0))
         lhpval += np.dot(factor[:, :size], c[0])
